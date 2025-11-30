@@ -1,3 +1,6 @@
+## 📢 Updates
+- 🎉 **2025-12-01** : ROS2 (Humble) version already supports this , please check the Humble branch.
+
 ## 0. Highlight
 ### 0.0 Pipeline
 <div align="center">
@@ -19,10 +22,14 @@ Left is original, pointcloud is upside down and gravity acceleration measured by
 
 ### 0.2 Robust localization based on offline pointcloud map
 
-Our solution can handle **rough initial pose**, allows **robust localization**, and offline pointcloud map guarantee **no accumulated localization errors** caused by long hours of work(unlike common SLAM).
+Our solution can handle **rough initial pose**, allows **robust localization**, and offline pointcloud map guarantee **no accumulated localization errors** caused by long hours of work(unlike common SLAM).In addition, we also tested it with a **robot dog**, and the visualization effect of the **colored point cloud** was better.
+
 <div align="center">
-<img src="doc/loc.gif" width=50% />
+<img src="doc/loc.gif" width=43% />
 <img src="doc/g1.png" width=40% />
+<img src="doc/GO2.gif" width=50% />
+<img src="doc/GO2.jpg" width=35% />
+
 </div>
 
 
