@@ -1,0 +1,70 @@
+<launch>
+    <!-- localization for Unitree Go2 -->
+	<node pkg="tf2_ros" type="static_transform_publisher" name="camera_init2odom"
+      args="0 0 0 0 0 0 1 odom camera_init" />
+
+	<!-- Mid-360 mounted on Go2 with 13deg pitch (handled in livox_ros_driver2),
+	     remaining offset between Go2 base_link and Mid-360 IMU is the translation only.
+	     translation: x=0.1870, y=0, z=0.0803 (Mid-360 lidar origin in Go2 body frame).
+	     The ~0.05m intra-sensor IMU<->lidar offset is absorbed by fast_lio extrinsic_T. -->
+	<node pkg="tf2_ros" type="static_transform_publisher" name="imulink2baselink"
+      args="0.1870 0 0.0803 0 0 0 1 base_link imu_link" />
+	<node pkg="tf2_ros" type="static_transform_publisher" name="base_center_broadcaster"
+      args="0 0 0 0 0 0 1 motion_link base_link" />
+
+	<node pkg="open3d_loc" type="global_localization_node"  name="global_localization_node" output="screen">
+
+		<rosparam command="load" file="$(find open3d_loc)/config/loc_param_go2.yaml" />
+
+		<!-- 单地图模式:用 path_map.如果同时设置了 maps 列表(见下),path_map 会被忽略. -->
+		<param name="path_map" type="string" value="$(find open3d_loc)/../data/map.ply" />
+
+		<!-- 多地图模式样例 (默认注释,需要时打开). $(find ...) 在 rosparam yaml 中不会展开,
+		     所以多地图清单在这里直接用 <rosparam> 内联,而不是放在外部 yaml. -->
+		<!--
+		<rosparam param="maps" subst_value="True">
+		  - { name: mapA, path: $(find open3d_loc)/../data/mapA.ply }
+		  - { name: mapB, path: $(find open3d_loc)/../data/mapB.ply }
+		</rosparam>
+		<rosparam param="map_switch" subst_value="True">
+		  enable: true
+		  active_map: mapA
+		  bbox_shrink: 1.0
+		  verify_fitness: 0.6
+		  verify_consecutive: 3
+		  verify_period_ms: 500
+		  cooldown_ms: 5000
+		</rosparam>
+		-->
+
+		<param name="pcd_queue_maxsize" type="int" value="10" />
+		<param name="voxelsize_coarse" type="double" value="0.15" />
+		<param name="voxelsize_fine" type="double" value="0.1" />
+
+		<!-- 定位配准阈值,超过这个值才更新odom2map -->
+		<param name="threshold_fitness" type="double" value="0.5" />
+
+		<!-- 初始化配准阈值,超过这个才能初始化成功 -->
+		<param name="threshold_fitness_init" type="double" value="0.5" />
+		<param name="loc_frequence" type="double" value="2.5" />
+		<param name="save_scan" type="bool" value="0"/>
+		<param name="hidden_removal" type="bool" value="0"/>
+		<param name="maxpoints_source" type="int" value="80000" />
+		<param name="maxpoints_target" type="int" value="400000" />
+
+		<!-- for odom2map -->
+		<param name="filter_odom2map" type="bool" value="0"/>
+		<param name="kalman_processVar2" type="double" value="0.001" />
+		<param name="kalman_estimatedMeasVar2" type="double" value="0.02" />
+
+		<!-- localization confidence threshold-->
+		<param name="confidence_loc_th" type="double" value="0.7" />
+
+		<!-- distance th for update current submap(target, history) -->
+		<param name="dis_updatemap" type="double" value="3.5" />
+	</node>
+
+	<param name="use_sim_time" value="false" />
+
+
+</launch>

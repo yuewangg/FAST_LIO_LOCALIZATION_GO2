@@ -15,7 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
   eigen_conversions
 )
 
-set(Open3D_DIR "/home/liar/open3d141/lib/cmake/Open3D")
+set(Open3D_DIR "/root/code_lib/open3d141/lib/cmake/Open3D")
 
 find_package(Open3D REQUIRED)
 

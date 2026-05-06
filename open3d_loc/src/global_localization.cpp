@@ -2,6 +2,11 @@
 #include <queue>
 #include <thread>
 #include <mutex>
+#include <shared_mutex>
+#include <atomic>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
 
 #include <ros/ros.h>
 #include <nav_msgs/Odometry.h>
@@ -13,6 +18,7 @@
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <std_msgs/Float32.h>
+#include <std_msgs/String.h>
 
 #include <eigen_conversions/eigen_msg.h>
 // #include <pcl/common/transforms.h>
@@ -23,6 +29,17 @@
 
 #include "open3d_registration/open3d_registration.h"
 #include "open3d_conversions/open3d_conversions.h"
+
+/// @brief 单张地图的所有运行期数据
+struct MapEntry
+{
+    std::string name;
+    std::string path;
+    std::shared_ptr<open3d::geometry::PointCloud> map_coarse;
+    std::shared_ptr<open3d::geometry::PointCloud> map_fine;
+    Eigen::Vector3d bbox_min{0, 0, 0};
+    Eigen::Vector3d bbox_max{0, 0, 0};
+};
 
 #define PI 3.1415926
 
@@ -81,9 +98,24 @@ public:
     /// @brief 订阅在初始位姿
     void CallbackInitialPose(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr &initialpose);
 
+    /// @brief 启动地图监视线程
     void StartLoc();
 
     void Localization();
+
+    /// @brief 后台线程,在重合区域对候选地图静默做 ICP,成功就触发切图
+    void MapSwitchMonitor();
+
+    /// @brief 切图(原子)
+    /// @param new_idx maps_ 中的下标
+    /// @param reason 用于状态日志
+    void SwitchActiveMap(int new_idx, const std::string &reason);
+
+    /// @brief 单张地图加载 + 降采样 + 算 AABB
+    bool LoadMap(const std::string &name, const std::string &path, MapEntry &out);
+
+    /// @brief 当前位姿是否落在某张地图(AABB - shrink)内
+    bool PoseInsideMap(const Eigen::Vector3d &xyz, const MapEntry &m) const;
 
     /// @brief 欧拉角转mat3x3
     /// @param euler
@@ -148,6 +180,25 @@ private:
     std::shared_ptr<open3d::geometry::PointCloud> pcd_map_cur_;
     std::shared_ptr<open3d::geometry::PointCloud> pcd_scan_cur_;
 
+    /// @brief 多地图列表与当前激活地图索引(同坐标系,可静默切换)
+    std::vector<MapEntry> maps_;
+    std::atomic<int> active_map_idx_{0};
+    std::atomic<int> candidate_map_idx_{-1};
+    /// 主循环读、切图写。读多写极少
+    mutable std::shared_mutex lock_maps_;
+    /// @brief 切图后,主循环下一帧强制重切 submap、用 multiscale ICP 跑一帧
+    std::atomic<bool> force_resubmap_{false};
+
+    /// @brief 多地图相关参数
+    bool map_switch_enable_ = false;
+    double bbox_shrink_ = 1.0;
+    double verify_fitness_ = 0.6;
+    int verify_consecutive_ = 3;
+    int verify_period_ms_ = 500;
+    int cooldown_ms_ = 5000;
+    /// @brief 后台监视线程
+    std::thread thread_monitor_;
+
     std::queue<open3d::geometry::PointCloud> que_pcd_scan_;
     int queue_maxsize_;
     double voxelsize_coarse_;
@@ -178,6 +229,8 @@ private:
     ros::Publisher pub_localization_3d_;
     ros::Publisher pub_localization_3d_confidence_;
     ros::Publisher pub_localization_3d_delay_ms_;
+    ros::Publisher pub_active_map_;
+    ros::Publisher pub_status_;
 
     geometry_msgs::PoseStamped localization_3d_;
     std_msgs::Float32 localization_3d_confidence_;
@@ -258,6 +311,8 @@ GloabalLocalization::GloabalLocalization(ros::NodeHandle &nh, ros::NodeHandle &n
     pub_localization_3d_ = nh.advertise<geometry_msgs::PoseStamped>("/localization_3d", 1, false);
     pub_localization_3d_confidence_ = nh.advertise<std_msgs::Float32>("/localization_3d_confidence", 1, false);
     pub_localization_3d_delay_ms_ = nh.advertise<std_msgs::Float32>("/localization_3d_delay_ms", 1, false);
+    pub_active_map_ = nh.advertise<std_msgs::String>("/localization_3d_active_map", 1, true);
+    pub_status_ = nh.advertise<std_msgs::String>("/localization_3d_status", 1, false);
 
     loc_frequence_ = 2.0; //
     loc_fitness_ = 0.0;
@@ -318,29 +373,108 @@ GloabalLocalization::GloabalLocalization(ros::NodeHandle &nh, ros::NodeHandle &n
     mat_initialpose_.block<3, 3>(0, 0) = Euler2Matrix3d(Eigen::Vector3d(initialpose_[3], initialpose_[4], initialpose_[5]));
     mat_initialpose_.block<3, 1>(0, 3) = Eigen::Vector3d(initialpose_[0], initialpose_[1], initialpose_[2]);
 
-    // 读取地图
+    // ========== 读取地图(支持单地图 path_map / 多地图 maps) ==========
     std::string path_map = "";
     nh_private_.param<std::string>("path_map", path_map, "");
-    open3d::io::ReadPointCloud(path_map, *pcd_map_ori_);
-    if (pcd_map_ori_ == nullptr || pcd_map_ori_->IsEmpty())
+
+    // 多地图相关参数
+    nh_private_.param<bool>("map_switch/enable", map_switch_enable_, false);
+    nh_private_.param<double>("map_switch/bbox_shrink", bbox_shrink_, 1.0);
+    nh_private_.param<double>("map_switch/verify_fitness", verify_fitness_, 0.6);
+    nh_private_.param<int>("map_switch/verify_consecutive", verify_consecutive_, 3);
+    nh_private_.param<int>("map_switch/verify_period_ms", verify_period_ms_, 500);
+    nh_private_.param<int>("map_switch/cooldown_ms", cooldown_ms_, 5000);
+
+    // 1) 优先读 maps 列表
+    XmlRpc::XmlRpcValue maps_param;
+    bool has_maps = nh_private_.getParam("maps", maps_param) &&
+                    maps_param.getType() == XmlRpc::XmlRpcValue::TypeArray &&
+                    maps_param.size() > 0;
+    if (has_maps)
     {
-        ROS_ERROR("read map from path: %s failed", path_map.c_str());
-        ros::shutdown();
+        for (int i = 0; i < maps_param.size(); ++i)
+        {
+            XmlRpc::XmlRpcValue &item = maps_param[i];
+            if (item.getType() != XmlRpc::XmlRpcValue::TypeStruct ||
+                !item.hasMember("name") || !item.hasMember("path"))
+            {
+                ROS_ERROR("maps[%d] must have name and path fields", i);
+                ros::shutdown();
+                return;
+            }
+            MapEntry entry;
+            entry.name = static_cast<std::string>(item["name"]);
+            entry.path = static_cast<std::string>(item["path"]);
+            if (!LoadMap(entry.name, entry.path, entry))
+            {
+                ROS_ERROR("LoadMap failed for %s (%s)", entry.name.c_str(), entry.path.c_str());
+                ros::shutdown();
+                return;
+            }
+            maps_.push_back(std::move(entry));
+        }
     }
-    pcd_map_ori_->PaintUniformColor({1, 0, 0});
+    // 2) 退化为单地图
+    else if (!path_map.empty())
+    {
+        MapEntry entry;
+        entry.name = "default";
+        entry.path = path_map;
+        if (!LoadMap(entry.name, entry.path, entry))
+        {
+            ROS_ERROR("LoadMap failed for path_map: %s", path_map.c_str());
+            ros::shutdown();
+            return;
+        }
+        maps_.push_back(std::move(entry));
+        map_switch_enable_ = false; // 单地图无意义
+    }
+    else
+    {
+        ROS_ERROR("neither 'maps' nor 'path_map' is set, cannot start");
+        ros::shutdown();
+        return;
+    }
 
-    pcd_map_coarse_ = pcd_map_ori_->VoxelDownSample(voxelsize_coarse_);
-    pcd_map_coarse_->EstimateNormals(open3d::geometry::KDTreeSearchParamHybrid(voxelsize_coarse_ * 2, 30));
+    // 3) 选 active_map
+    std::string active_map_name;
+    nh_private_.param<std::string>("map_switch/active_map", active_map_name, maps_[0].name);
+    int active_idx = -1;
+    for (size_t i = 0; i < maps_.size(); ++i)
+    {
+        if (maps_[i].name == active_map_name)
+        {
+            active_idx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (active_idx < 0)
+    {
+        ROS_WARN("active_map '%s' not in maps list, fallback to '%s'",
+                 active_map_name.c_str(), maps_[0].name.c_str());
+        active_idx = 0;
+    }
+    active_map_idx_.store(active_idx);
+    ROS_WARN("active map: %s (%zu maps loaded, switch=%s)",
+             maps_[active_idx].name.c_str(), maps_.size(),
+             map_switch_enable_ ? "on" : "off");
 
-    /// publish map, 用粗地图可视化，减少资源占用
-    sensor_msgs::PointCloud2 pc2_map;
-    open3d_conversions::open3dToRos(*pcd_map_coarse_, pc2_map);
-    pc2_map.header.frame_id = "map";
-    pc2_map.header.stamp = ros::Time::now();
-    pub_map_.publish(pc2_map);
+    // 4) 兼容旧字段:把 active 的 fine/coarse 复制给老指针,供历史代码继续用
+    pcd_map_coarse_ = maps_[active_idx].map_coarse;
+    pcd_map_fine_ = maps_[active_idx].map_fine;
 
-    pcd_map_fine_ = pcd_map_ori_->VoxelDownSample(voxelsize_fine_);
-    pcd_map_fine_->EstimateNormals(open3d::geometry::KDTreeSearchParamHybrid(voxelsize_fine_ * 2, 30));
+    // 5) 发布初始 /map(latched)
+    {
+        sensor_msgs::PointCloud2 pc2_map;
+        open3d_conversions::open3dToRos(*maps_[active_idx].map_coarse, pc2_map);
+        pc2_map.header.frame_id = "map";
+        pc2_map.header.stamp = ros::Time::now();
+        pub_map_.publish(pc2_map);
+
+        std_msgs::String s;
+        s.data = maps_[active_idx].name;
+        pub_active_map_.publish(s);
+    }
 
 
     GetTfTransformToMatrix("base_link", "imu_link", mat_imulink2baselink_);
@@ -358,6 +492,46 @@ GloabalLocalization::~GloabalLocalization()
     lock_exit_.lock();
     flag_exit_ = true;
     lock_exit_.unlock();
+    if (thread_monitor_.joinable())
+    {
+        thread_monitor_.join();
+    }
+}
+
+bool GloabalLocalization::LoadMap(const std::string &name, const std::string &path, MapEntry &out)
+{
+    auto pcd_ori = std::make_shared<open3d::geometry::PointCloud>();
+    if (!open3d::io::ReadPointCloud(path, *pcd_ori) || pcd_ori->IsEmpty())
+    {
+        ROS_ERROR("LoadMap: read '%s' failed (path=%s)", name.c_str(), path.c_str());
+        return false;
+    }
+    pcd_ori->PaintUniformColor({1, 0, 0});
+
+    out.name = name;
+    out.path = path;
+    out.map_coarse = pcd_ori->VoxelDownSample(voxelsize_coarse_);
+    out.map_coarse->EstimateNormals(open3d::geometry::KDTreeSearchParamHybrid(voxelsize_coarse_ * 2, 30));
+    out.map_fine = pcd_ori->VoxelDownSample(voxelsize_fine_);
+    out.map_fine->EstimateNormals(open3d::geometry::KDTreeSearchParamHybrid(voxelsize_fine_ * 2, 30));
+
+    auto aabb = pcd_ori->GetAxisAlignedBoundingBox();
+    out.bbox_min = aabb.min_bound_;
+    out.bbox_max = aabb.max_bound_;
+    ROS_WARN("loaded map '%s': %zu pts (fine), bbox [%.2f,%.2f,%.2f]~[%.2f,%.2f,%.2f]",
+             name.c_str(), out.map_fine->points_.size(),
+             out.bbox_min.x(), out.bbox_min.y(), out.bbox_min.z(),
+             out.bbox_max.x(), out.bbox_max.y(), out.bbox_max.z());
+    return true;
+}
+
+bool GloabalLocalization::PoseInsideMap(const Eigen::Vector3d &xyz, const MapEntry &m) const
+{
+    Eigen::Vector3d lo = m.bbox_min + Eigen::Vector3d::Constant(bbox_shrink_);
+    Eigen::Vector3d hi = m.bbox_max - Eigen::Vector3d::Constant(bbox_shrink_);
+    return xyz.x() >= lo.x() && xyz.x() <= hi.x() &&
+           xyz.y() >= lo.y() && xyz.y() <= hi.y();
+    // 不限制 z(z 方向通常很窄,会误判出图)
 }
 
 Eigen::Matrix3d GloabalLocalization::Euler2Matrix3d(const Eigen::Vector3d euler)
@@ -612,7 +786,10 @@ void GloabalLocalization::LocalizationInitialize()
             OBB_map->R_ = mat_baselink2map_cur.block<3, 3>(0, 0);
             OBB_scan->center_ = mat_baselink2odom_cur.block<3, 1>(0, 3);
             OBB_scan->R_ = mat_baselink2odom_cur.block<3, 3>(0, 0);
-            *map_fine_crop = *pcd_map_fine_->Crop(*OBB_map);
+            {
+                std::shared_lock<std::shared_mutex> rlock(lock_maps_);
+                *map_fine_crop = *maps_[active_map_idx_.load()].map_fine->Crop(*OBB_map);
+            }
 
             /// 配准计时
             auto reg0_s = std::chrono::high_resolution_clock::now();
@@ -782,19 +959,23 @@ void GloabalLocalization::Localization()
             lock_scan_.unlock();
             Eigen::Vector3d cur_loc(mat_baselink2map_cur(0, 3), mat_baselink2map_cur(1, 3), mat_baselink2map_cur(2, 3));
             auto dis_motion = ComputeMotionDis(last_loc_, cur_loc);
-            if (dis_motion > dis_updatemap_)
+            bool just_switched = force_resubmap_.exchange(false);
+            if (dis_motion > dis_updatemap_ || just_switched)
             {
                 auto submap_s = std::chrono::high_resolution_clock::now();
 
                 open3d::utility::LogInfo("\n***\n****\n***\n\n\nlast map update loc: x: {}, y: {}, z{},\n\
-                now loc: x: {}, y: {}, z{}, 3d distance: {}, now needpdate submap",
-                                         last_loc_.x(), last_loc_.y(), last_loc_.z(), cur_loc.x(), cur_loc.y(), cur_loc.z(), dis_motion);
+                now loc: x: {}, y: {}, z{}, 3d distance: {}, now needpdate submap (just_switched={})",
+                                         last_loc_.x(), last_loc_.y(), last_loc_.z(), cur_loc.x(), cur_loc.y(), cur_loc.z(), dis_motion, just_switched);
                 last_loc_ = cur_loc;
                 OBB_map->center_ = mat_baselink2map_cur.block<3, 1>(0, 3);
                 OBB_map->R_ = mat_baselink2map_cur.block<3, 3>(0, 0);
 
                 /// 粗地图和精地图
-                *map_fine_crop = *pcd_map_fine_->Crop(*OBB_map);
+                {
+                    std::shared_lock<std::shared_mutex> rlock(lock_maps_);
+                    *map_fine_crop = *maps_[active_map_idx_.load()].map_fine->Crop(*OBB_map);
+                }
 
                 auto submap_e = std::chrono::high_resolution_clock::now();
                 auto submap_cost = std::chrono::duration_cast<std::chrono::microseconds>(submap_e - submap_s).count() / 1000.0;
@@ -863,6 +1044,196 @@ void GloabalLocalization::Localization()
 void GloabalLocalization::StartLoc()
 {
     thread_loc_ = std::thread(&GloabalLocalization::Localization, this);
+    if (map_switch_enable_ && maps_.size() > 1)
+    {
+        thread_monitor_ = std::thread(&GloabalLocalization::MapSwitchMonitor, this);
+        ROS_WARN("MapSwitchMonitor started (period=%dms, verify_fitness=%.2f, consec=%d)",
+                 verify_period_ms_, verify_fitness_, verify_consecutive_);
+    }
+}
+
+void GloabalLocalization::SwitchActiveMap(int new_idx, const std::string &reason)
+{
+    if (new_idx < 0 || new_idx >= static_cast<int>(maps_.size()))
+    {
+        return;
+    }
+    int old_idx = active_map_idx_.load();
+    if (new_idx == old_idx)
+    {
+        return;
+    }
+    {
+        std::unique_lock<std::shared_mutex> wlock(lock_maps_);
+        active_map_idx_.store(new_idx);
+        // 兼容旧指针(其他可能未改完的代码路径仍能跑)
+        pcd_map_coarse_ = maps_[new_idx].map_coarse;
+        pcd_map_fine_ = maps_[new_idx].map_fine;
+    }
+    force_resubmap_.store(true);
+
+    // 重发 latched /map,RViz 自动刷新
+    sensor_msgs::PointCloud2 pc2_map;
+    open3d_conversions::open3dToRos(*maps_[new_idx].map_coarse, pc2_map);
+    pc2_map.header.frame_id = "map";
+    pc2_map.header.stamp = ros::Time::now();
+    pub_map_.publish(pc2_map);
+
+    std_msgs::String s;
+    s.data = maps_[new_idx].name;
+    pub_active_map_.publish(s);
+
+    std_msgs::String st;
+    st.data = std::string("SWITCHED:") + maps_[old_idx].name + "->" + maps_[new_idx].name + " (" + reason + ")";
+    pub_status_.publish(st);
+
+    ROS_WARN("SwitchActiveMap: %s -> %s (%s)",
+             maps_[old_idx].name.c_str(), maps_[new_idx].name.c_str(), reason.c_str());
+}
+
+void GloabalLocalization::MapSwitchMonitor()
+{
+    open3d::geometry::OrientedBoundingBox OBB_map;
+    open3d::geometry::OrientedBoundingBox OBB_scan;
+    OBB_map.extent_ = Eigen::Vector3d(60, 60, 40);
+    OBB_scan.extent_ = Eigen::Vector3d(60, 60, 40);
+
+    int last_candidate = -1;
+    int consecutive_success = 0;
+    auto cooldown_until = std::chrono::steady_clock::now();
+
+    // 后台 ICP 用更小的点数预算,降 CPU 抢占
+    const int max_src = std::max(10000, maxpoints_source_ / 2);
+    const int max_tgt = std::max(40000, maxpoints_target_ / 2);
+
+    while (true)
+    {
+        {
+            std::lock_guard<std::mutex> lk(lock_exit_);
+            if (flag_exit_) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(verify_period_ms_));
+
+        if (!loc_initialized_) continue;
+        if (std::chrono::steady_clock::now() < cooldown_until) continue;
+
+        // 1) snapshot 当前位姿
+        Eigen::Matrix4d baselink2map_snap;
+        Eigen::Matrix4d baselink2odom_snap;
+        Eigen::Matrix4d odom2map_snap;
+        {
+            std::lock_guard<std::mutex> lk(lock_mat_odom2map_);
+            baselink2map_snap = mat_baselink2map_;
+            baselink2odom_snap = mat_baselink2odom_;
+            odom2map_snap = mat_odom2map_;
+        }
+        Eigen::Vector3d xyz = baselink2map_snap.block<3, 1>(0, 3);
+
+        // 2) 选第一张包含当前位姿的非 active 地图
+        int active = active_map_idx_.load();
+        int cand = -1;
+        {
+            std::shared_lock<std::shared_mutex> rlock(lock_maps_);
+            for (int i = 0; i < static_cast<int>(maps_.size()); ++i)
+            {
+                if (i == active) continue;
+                if (PoseInsideMap(xyz, maps_[i]))
+                {
+                    cand = i;
+                    break;
+                }
+            }
+        }
+        candidate_map_idx_.store(cand);
+        if (cand < 0)
+        {
+            last_candidate = -1;
+            consecutive_success = 0;
+            continue;
+        }
+        // 候选切换 → 计数清零
+        if (cand != last_candidate)
+        {
+            last_candidate = cand;
+            consecutive_success = 0;
+        }
+
+        // 3) 取 candidate 的 fine,在当前位姿附近裁 OBB
+        std::shared_ptr<open3d::geometry::PointCloud> target;
+        std::string cand_name;
+        {
+            std::shared_lock<std::shared_mutex> rlock(lock_maps_);
+            OBB_map.center_ = baselink2map_snap.block<3, 1>(0, 3);
+            OBB_map.R_ = baselink2map_snap.block<3, 3>(0, 0);
+            target = maps_[cand].map_fine->Crop(OBB_map);
+            cand_name = maps_[cand].name;
+        }
+        if (target->points_.size() < 1000)
+        {
+            // candidate 在该位姿附近根本没数据,跳过
+            consecutive_success = 0;
+            continue;
+        }
+        if (static_cast<int>(target->points_.size()) > max_tgt)
+        {
+            target = target->RandomDownSample(double(max_tgt) / target->points_.size());
+        }
+
+        // 4) 取最新 scan,用 odom 系下的 OBB 裁
+        std::shared_ptr<open3d::geometry::PointCloud> source(new open3d::geometry::PointCloud);
+        {
+            std::lock_guard<std::mutex> lk(lock_scan_);
+            if (pcd_scan_cur_->IsEmpty()) continue;
+            OBB_scan.center_ = baselink2odom_snap.block<3, 1>(0, 3);
+            OBB_scan.R_ = baselink2odom_snap.block<3, 3>(0, 0);
+            source = pcd_scan_cur_->Crop(OBB_scan);
+        }
+        source = source->VoxelDownSample(voxelsize_fine_);
+        if (source->points_.size() < 1000) continue;
+        if (static_cast<int>(source->points_.size()) > max_src)
+        {
+            source = source->RandomDownSample(double(max_src) / source->points_.size());
+        }
+
+        // 5) 在 candidate map 下做 multiscale ICP,初值就是当前 odom2map(同坐标系)
+        source->Transform(odom2map_snap);
+        Eigen::Matrix4d delta = pcd_tools::RegistrationMultiScaleIcp(source, target, voxelsize_fine_, 1, {1, 4, 6});
+        source->Transform(delta);
+        auto eva = open3d::pipelines::registration::EvaluateRegistration(*source, *target, voxelsize_fine_ * 3);
+        double fit = eva.fitness_;
+
+        // 6) 状态广播
+        {
+            std_msgs::String st;
+            std::ostringstream os;
+            os << "VERIFYING:" << cand_name << " fit=" << std::fixed << std::setprecision(2) << fit
+               << " streak=" << consecutive_success;
+            st.data = os.str();
+            pub_status_.publish(st);
+        }
+        ROS_INFO("[MapSwitchMonitor] candidate=%s fitness=%.3f (need >%.2f, streak %d/%d)",
+                 cand_name.c_str(), fit, verify_fitness_, consecutive_success, verify_consecutive_);
+
+        if (fit > verify_fitness_)
+        {
+            consecutive_success += 1;
+            if (consecutive_success >= verify_consecutive_)
+            {
+                std::ostringstream r;
+                r << "fit=" << std::fixed << std::setprecision(2) << fit
+                  << " streak=" << consecutive_success;
+                SwitchActiveMap(cand, r.str());
+                consecutive_success = 0;
+                last_candidate = -1;
+                cooldown_until = std::chrono::steady_clock::now() +
+                                 std::chrono::milliseconds(cooldown_ms_);
+            }
+        }
+        else
+        {
+            consecutive_success = 0;
+        }
+    }
 }
 
 void GloabalLocalization::CallbackInitialPose(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr &initialpose)

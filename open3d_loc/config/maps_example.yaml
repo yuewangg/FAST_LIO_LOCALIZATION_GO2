@@ -1,0 +1,23 @@
+# 多地图静默切换样板配置。
+# 用法:在 open3d_loc_go2.launch 里 <rosparam command="load" file="..." /> 这一份替换 loc_param_go2.yaml,
+# 或者把下面 maps:/map_switch: 两段直接合并到 loc_param_go2.yaml 中。
+
+initialpose:  [0, 0, 0, 0, 0, 0]
+
+kf_baselink2map:
+  x: [0.001, 0.002]
+  y: [0.001, 0.005]
+  z: [0.00001, 0.04]
+
+maps:
+  - { name: mapA, path: $(find open3d_loc)/../data/mapA.ply }
+  - { name: mapB, path: $(find open3d_loc)/../data/mapB.ply }
+
+map_switch:
+  enable: true
+  active_map: mapA
+  bbox_shrink: 1.0
+  verify_fitness: 0.6
+  verify_consecutive: 3
+  verify_period_ms: 500
+  cooldown_ms: 5000
