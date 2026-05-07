@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(open3d_loc)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -std=c++17")
+set(CMAKE_CXX_STANDARD 17)
 SET(CMAKE_BUILD_TYPE "Release")
 
 find_package(catkin REQUIRED COMPONENTS
@@ -15,7 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
   eigen_conversions
 )
 
-set(Open3D_DIR "/root/code_lib/open3d141/lib/cmake/Open3D")
+set(Open3D_DIR "/root/loc_ws/lib/open3d141/lib/cmake/Open3D")
 
 find_package(Open3D REQUIRED)
 

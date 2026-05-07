@@ -223,7 +223,15 @@ Visualization Manager:
           Value: true
         camera_init:
           Value: true
+        localization_world:
+          Value: true
         map:
+          Value: true
+        map_vsis515:
+          Value: true
+        map_vsis516:
+          Value: true
+        motion_link:
           Value: true
         odom:
           Value: true
@@ -233,12 +241,15 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
-        map:
-          base_link:
-            {}
-          odom:
-            camera_init:
+        localization_world:
+          map_vsis515:
+            odom:
+              camera_init:
+                {}
+            base_link:
               {}
+          map_vsis516:
+            {}
       Update Interval: 0
       Value: true
     - Alpha: 1
@@ -273,7 +284,7 @@ Visualization Manager:
   Global Options:
     Background Color: 48; 48; 48
     Default Light: true
-    Fixed Frame: map
+    Fixed Frame: localization_world
     Frame Rate: 30
   Name: root
   Tools:

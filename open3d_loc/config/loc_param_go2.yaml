@@ -1,4 +1,5 @@
 # x, y, z, roll, pitch, yaw (单位:度degrees)
+# initialpose 表示 T_map_base: 机器人 base_link 在地图坐标系下的位姿
 initialpose:  [0, 0, 0, 0, 0, 0]
 
 kf_baselink2map:
@@ -9,7 +10,9 @@ kf_baselink2map:
 # ========== 多地图静默切换 ==========
 # 单地图模式:不写 maps 字段,直接用 launch 的 path_map 即可,行为完全等价于改造前。
 # 多地图模式:列出每张地图的 name 与 path,maps 出现即生效,会忽略 path_map。
-# 所有地图必须已对齐到同一全局坐标系。
+# 每张地图拥有独立局部坐标系,frame_id 为 "map_<name>"。
+# initialpose / next_initialpose 均表示 T_map_base: 机器人在该地图坐标系下的位姿,
+# 运行时会自动转换为 T_map_odom = T_map_base * inv(T_odom_base)。
 #
 # maps:
 #   - { name: lobby,    path: $(find open3d_loc)/../data/lobby.ply }
