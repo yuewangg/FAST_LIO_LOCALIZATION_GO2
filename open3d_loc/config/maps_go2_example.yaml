@@ -1,0 +1,27 @@
+# 多地图配置模板。只有 roslaunch 时传 use_multimap:=true 才应加载本文件。
+# initialpose / next_initialpose 均表示 T_map_base:
+# [x, y, z, roll_deg, pitch_deg, yaw_deg]
+
+maps:
+  - name: map_a
+    path: $(find open3d_loc)/../data/map_a.pcd
+    switch_zone: [0.0, 0.0, 1.0, 1.0]
+    next_initialpose: [0, 0, 0, 0, 0, 0]
+
+  - name: map_b
+    path: $(find open3d_loc)/../data/map_b.pcd
+    initialpose: [0, 0, 0, 0, 0, 0]
+
+map_switch:
+  enable: true
+  active_map: map_a
+  bbox_shrink: 1.0
+  verify_fitness: 0.6
+  verify_consecutive: 3
+  verify_period_ms: 500
+  cooldown_ms: 5000
+  verify_icp_threshold: 0.3
+  verify_max_translation: 1.0
+  verify_max_yaw_deg: 20.0
+  post_switch_min_fitness: 0.3
+  allow_uncalibrated_switch: false

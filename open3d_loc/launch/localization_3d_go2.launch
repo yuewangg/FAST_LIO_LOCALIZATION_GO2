@@ -1,6 +1,29 @@
 <launch>
-	<include file="$(find fast_lio)/launch/mapping_mid360_go2.launch" />
-	<include file="$(find open3d_loc)/launch/open3d_loc_go2.launch" />
+    <arg name="use_sim_time" default="false" />
+    <arg name="rviz" default="false" />
+    <arg name="map_path" default="$(find open3d_loc)/../data/map.ply" />
+    <arg name="use_multimap" default="false" />
+    <arg name="maps_config" default="$(find open3d_loc)/config/maps_go2_example.yaml" />
+    <arg name="base_to_imu_x" default="0.1870" />
+    <arg name="base_to_imu_y" default="0.0" />
+    <arg name="base_to_imu_z" default="0.0803" />
 
-	<node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz_map_cur" args="-d $(find open3d_loc)/rviz_cfg/loc_map_cur.rviz" />
+    <include file="$(find fast_lio)/launch/mapping_mid360_go2.launch">
+        <arg name="use_sim_time" value="$(arg use_sim_time)" />
+        <arg name="rviz" value="false" />
+    </include>
+
+    <include file="$(find open3d_loc)/launch/open3d_loc_go2.launch">
+        <arg name="use_sim_time" value="$(arg use_sim_time)" />
+        <arg name="map_path" value="$(arg map_path)" />
+        <arg name="use_multimap" value="$(arg use_multimap)" />
+        <arg name="maps_config" value="$(arg maps_config)" />
+        <arg name="base_to_imu_x" value="$(arg base_to_imu_x)" />
+        <arg name="base_to_imu_y" value="$(arg base_to_imu_y)" />
+        <arg name="base_to_imu_z" value="$(arg base_to_imu_z)" />
+    </include>
+
+    <group if="$(arg rviz)">
+        <node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz_map_cur" args="-d $(find open3d_loc)/rviz_cfg/loc_map_cur.rviz" />
+    </group>
 </launch>

@@ -16,7 +16,13 @@ find_package(catkin REQUIRED COMPONENTS
   eigen_conversions
 )
 
-set(Open3D_DIR "/root/loc_ws/lib/open3d141/lib/cmake/Open3D")
+if(NOT Open3D_DIR)
+  if(DEFINED ENV{Open3D_DIR})
+    set(Open3D_DIR "$ENV{Open3D_DIR}" CACHE PATH "Path to Open3DConfig.cmake")
+  else()
+    set(Open3D_DIR "/root/loc_ws/lib/open3d141/lib/cmake/Open3D" CACHE PATH "Path to Open3DConfig.cmake")
+  endif()
+endif()
 
 find_package(Open3D REQUIRED)
 

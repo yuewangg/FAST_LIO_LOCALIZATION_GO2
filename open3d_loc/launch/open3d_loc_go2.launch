@@ -1,14 +1,23 @@
 <launch>
     <!-- localization for Unitree Go2 -->
+
+    <arg name="use_sim_time" default="false" />
+    <arg name="map_path" default="$(find open3d_loc)/../data/map.ply" />
+    <arg name="use_multimap" default="false" />
+    <arg name="maps_config" default="$(find open3d_loc)/config/maps_go2_example.yaml" />
+    <arg name="base_to_imu_x" default="0.1870" />
+    <arg name="base_to_imu_y" default="0.0" />
+    <arg name="base_to_imu_z" default="0.0803" />
+
 	<node pkg="tf2_ros" type="static_transform_publisher" name="camera_init2odom"
       args="0 0 0 0 0 0 1 odom camera_init" />
 
 	<!-- Mid-360 mounted on Go2 with 13deg pitch (handled in livox_ros_driver2),
 	     remaining offset between Go2 base_link and Mid-360 IMU is the translation only.
-	     translation: x=0.1870, y=0, z=0.0803 (Mid-360 lidar origin in Go2 body frame).
+	     translation: x=$(arg base_to_imu_x), y=$(arg base_to_imu_y), z=$(arg base_to_imu_z) (Mid-360 lidar origin in Go2 body frame).
 	     The ~0.05m intra-sensor IMU<->lidar offset is absorbed by fast_lio extrinsic_T. -->
 	<node pkg="tf2_ros" type="static_transform_publisher" name="imulink2baselink"
-      args="0.1870 0 0.0803 0 0 0 1 base_link imu_link" />
+      args="$(arg base_to_imu_x) $(arg base_to_imu_y) $(arg base_to_imu_z) 0 0 0 1 base_link imu_link" />
 	<node pkg="tf2_ros" type="static_transform_publisher" name="base_center_broadcaster"
       args="0 0 0 0 0 0 1 motion_link base_link" />
 
@@ -16,39 +25,42 @@
 
 		<rosparam command="load" file="$(find open3d_loc)/config/loc_param_go2.yaml" />
 
-		<!-- 单地图模式:用 path_map.如果同时设置了 maps 列表(见下),path_map 会被忽略. -->
-		<!-- <param name="path_map" type="string" value="$(find open3d_loc)/../data/map.ply" /> -->
+		<!-- 单地图模式：实机默认。 -->
+		<param unless="$(arg use_multimap)" name="path_map" type="string" value="$(arg map_path)" />
+
+		<!-- 多地图模式：只有显式 use_multimap:=true 时加载。 -->
+		<rosparam if="$(arg use_multimap)" command="load" file="$(arg maps_config)" subst_value="true" />
 
 		<!-- vsis_2026-05-06-17-39-20.bag 参数记录:
 		     bag start: 1778060360.38, duration: 143s.
 		     515 地图启动初始化; 515 switch_zone 触发时间约 1778060449.60,
 		     即 bag elapsed ~= 89.2s. 进入区域后开始静默验证 516,
 		     连续 5 次通过后约在 bag elapsed ~= 109.2s 切换. -->
-		<!-- 多地图模式: vsis515 和 vsis516 -->
+		<!-- 多地图模式: vsis515 和 vsis516 (已移至 maps_go2_example.yaml 模板文件) -->
 		<!-- switch_zone: 切换触发区域 [xmin, ymin, xmax, ymax] -->
 		<!-- next_initialpose: 切到下一张地图的初值 [x, y, z, roll, pitch, yaw](度), 表示 T_map_base -->
 		<!-- initialpose: 该地图自身初始位姿 [x, y, z, roll, pitch, yaw](度), 表示 T_map_base -->
 		<!-- 每张地图独立 frame_id: "map_<name>", 如 map_vsis515, map_vsis516 -->
 		<!-- RViz Fixed Frame 建议设为 "localization_world" -->
-		<rosparam param="maps" subst_value="True">
-- { name: vsis515, path: $(find open3d_loc)/data/vsis515.pcd, switch_zone: [0.0, 0.0, 19.0, 22.0], next_initialpose: [0, 0, 0, 0, 0, 0] }
-- { name: vsis516, path: $(find open3d_loc)/data/vsis516.pcd, initialpose: [0, 0, 0, 0, 0, 0] }
-</rosparam>
-		<rosparam param="map_switch" subst_value="True">
-enable: true
-active_map: vsis515
-bbox_shrink: 1.0
-verify_fitness: 0.5
-verify_consecutive: 5
-verify_period_ms: 1000
-cooldown_ms: 10000
-<!-- 只允许候选地图围绕切换初值做小幅局部 ICP,避免高 fitness 的错误跳变. -->
-verify_icp_threshold: 0.3
-verify_max_translation: 1.0
-verify_max_yaw_deg: 20.0
-post_switch_min_fitness: 0.3
-allow_uncalibrated_switch: true
-</rosparam>
+		<!-- <rosparam param="maps" subst_value="True"> -->
+		<!-- - { name: vsis515, path: $(find open3d_loc)/data/vsis515.pcd, switch_zone: [0.0, 0.0, 19.0, 22.0], next_initialpose: [0, 0, 0, 0, 0, 0] } -->
+		<!-- - { name: vsis516, path: $(find open3d_loc)/data/vsis516.pcd, initialpose: [0, 0, 0, 0, 0, 0] } -->
+		<!-- </rosparam> -->
+		<!-- <rosparam param="map_switch" subst_value="True"> -->
+		<!-- enable: true -->
+		<!-- active_map: vsis515 -->
+		<!-- bbox_shrink: 1.0 -->
+		<!-- verify_fitness: 0.5 -->
+		<!-- verify_consecutive: 5 -->
+		<!-- verify_period_ms: 1000 -->
+		<!-- cooldown_ms: 10000 -->
+		<!-- 只允许候选地图围绕切换初值做小幅局部 ICP,避免高 fitness 的错误跳变. -->
+		<!-- verify_icp_threshold: 0.3 -->
+		<!-- verify_max_translation: 1.0 -->
+		<!-- verify_max_yaw_deg: 20.0 -->
+		<!-- post_switch_min_fitness: 0.3 -->
+		<!-- allow_uncalibrated_switch: true -->
+		<!-- </rosparam> -->
 
 		<param name="pcd_queue_maxsize" type="int" value="10" />
 		<param name="voxelsize_coarse" type="double" value="0.15" />
@@ -77,7 +89,7 @@ allow_uncalibrated_switch: true
 		<param name="dis_updatemap" type="double" value="3.5" />
 	</node>
 
-	<param name="use_sim_time" value="true" />
+	<param name="use_sim_time" value="$(arg use_sim_time)" />
 
 
 </launch>
